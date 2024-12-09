@@ -1,0 +1,261 @@
+# Mise à jour des dépendances
+!pip install --upgrade ipywidgets notebook shap xgboost kagglehub
+
+# Importation des bibliothèques nécessaires
+import kagglehub
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from xgboost import XGBRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+import shap
+import os
+import warnings
+import seaborn as sns
+from scipy.stats import pearsonr, spearmanr
+from scipy.stats import norm
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+# Fonction Black-Scholes
+def black_scholes(S, K, T, r, sigma, option_type="call"):
+    """
+    Calcule le prix d'une option européenne selon le modèle Black-Scholes.
+
+    Arguments :
+    S : prix du sous-jacent (Spot price)
+    K : prix d'exercice (Strike price)
+    T : temps jusqu'à l'échéance (en années)
+    r : taux d'intérêt sans risque
+    sigma : volatilité (en décimal, par ex. 0.2 pour 20%)
+    option_type : "call" ou "put" pour spécifier le type d'option
+
+    Retourne :
+    Prix de l'option.
+    """
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+
+    if option_type == "call":
+        return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+    elif option_type == "put":
+        return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+    else:
+        raise ValueError("option_type doit être 'call' ou 'put'")
+
+# Étape 1 : Télécharger la base Kaggle
+path = kagglehub.dataset_download("ehallmar/daily-historical-stock-prices-1970-2018")
+
+# Charger les données dans un DataFrame
+file_name = "historical_stock_prices.csv"
+file_path = os.path.join(path, file_name)
+data = pd.read_csv(file_path, usecols=['date', 'close', 'high', 'low', 'volume', 'ticker'], parse_dates=['date'])
+
+# Filtrer les données entre 2014 et 2018
+data = data[(data['date'] >= '2014-01-01') & (data['date'] <= '2018-12-31')]
+
+# Limiter à un échantillon de 5%
+data = data.sample(frac=0.05, random_state=42)
+
+print("\nTaille de l'ensemble de données après échantillonnage :", data.shape)
+
+# Supprimer les lignes avec des valeurs manquantes
+data = data.dropna()
+
+# Ajouter des colonnes calculées
+data['strike'] = data['close'] * 1.1  # Exemple : Strike à 10% au-dessus de Close
+data['volatility'] = (data['high'] - data['low']) / data['close']  # Calcul de la volatilité
+data['maturity'] = np.random.randint(30, 365, size=len(data))  # Générer des maturités aléatoires
+data['interest_rate'] = 0.02  # Ajouter une colonne de taux d'intérêt constant
+
+# Ajouter les colonnes des prix Black-Scholes
+data['bs_call'] = black_scholes(
+    S=data['close'],
+    K=data['strike'],
+    T=data['maturity'] / 365,  # Conversion des jours en années
+    r=data['interest_rate'],
+    sigma=data['volatility'],
+    option_type="call"
+)
+data['bs_put'] = black_scholes(
+    S=data['close'],
+    K=data['strike'],
+    T=data['maturity'] / 365,
+    r=data['interest_rate'],
+    sigma=data['volatility'],
+    option_type="put"
+)
+
+# Normalisation des colonnes nécessaires
+columns_to_normalize = ['strike', 'volatility', 'maturity', 'interest_rate', 'close', 'volume']
+scaler = StandardScaler()
+data[columns_to_normalize] = scaler.fit_transform(data[columns_to_normalize])
+
+
+# Visualisation des courbes pour chaque action avec échantillonnage
+actions = data['ticker'].unique()  # Liste des actions disponibles dans les données
+
+# Échantillonner les données pour réduire la taille des graphiques
+sampled_data = data.groupby('ticker').apply(lambda x: x.sample(frac=0.1, random_state=42)).reset_index(drop=True)
+
+
+# Ajout des courbes de volatility vs Strike pour chaque action
+plt.figure(figsize=(10, 6))
+sns.histplot(
+    data=sampled_data, x="strike", y="volatility",
+    bins=50, cmap="viridis", cbar=True
+)
+plt.title('Heatmap - Strike vs Volatility')
+plt.xlabel('Strike')
+plt.ylabel('Volatility')
+plt.show()
+# Analyse automatique pour Heatmap : Strike vs Volatility
+print("\n--- Analyse : Heatmap Strike vs Volatility ---")
+# Calcul des coefficients de corrélation
+pearson_corr, _ = pearsonr(sampled_data['strike'], sampled_data['volatility'])
+spearman_corr, _ = spearmanr(sampled_data['strike'], sampled_data['volatility'])
+
+print(f"Coefficient de corrélation de Pearson : {pearson_corr:.2f}")
+print(f"Coefficient de corrélation de Spearman : {spearman_corr:.2f}")
+
+# Analyse des zones de densité élevée
+high_density_zone = sampled_data[(sampled_data['strike'] <= 10) & (sampled_data['volatility'] <= 2)]
+print(f"Proportion des points dans une zone de Strike <= 10 et Volatility <= 2 : {len(high_density_zone) / len(sampled_data) * 100:.2f}%")
+
+# Détection des outliers potentiels
+outliers = sampled_data[(sampled_data['strike'] > 50) & (sampled_data['volatility'] > 5)]
+print(f"Nombre d'outliers identifiés : {len(outliers)}")
+
+# Statistiques descriptives pour 'strike' et 'volatility'
+strike_stats = sampled_data['strike'].describe()
+volatility_stats = sampled_data['volatility'].describe()
+
+# Identifier les zones à forte densité
+high_density_zone = sampled_data[(sampled_data['strike'] < 10) & (sampled_data['volatility'] < 2)]
+high_density_proportion = len(high_density_zone) / len(sampled_data) * 100
+
+# Statistiques sur la zone de forte densité
+hdz_strike_stats = high_density_zone['strike'].describe()
+hdz_volatility_stats = high_density_zone['volatility'].describe()
+
+print("Statistiques globales de 'strike' :")
+print(strike_stats)
+print("\nStatistiques globales de 'volatility' :")
+print(volatility_stats)
+print(f"\nProportion des points dans la zone de forte densité : {high_density_proportion:.2f}%")
+print("Statistiques de 'strike' dans la zone de forte densité :")
+print(hdz_strike_stats)
+print("\nStatistiques de 'volatility' dans la zone de forte densité :")
+print(hdz_volatility_stats)
+
+# Ajout des courbes de volatility vs maturity pour chaque action
+plt.figure(figsize=(10, 6))
+sns.kdeplot(
+    data=sampled_data, x="maturity", y="volatility",
+    cmap="coolwarm", fill=True, thresh=0.1
+)
+plt.title('KDE - Maturity vs Volatility')
+plt.xlabel('Maturity (days)')
+plt.ylabel('Volatility')
+plt.show()
+
+# Analyse automatique pour KDE : Maturity vs Volatility
+print("\n--- Analyse : KDE Maturity vs Volatility ---")
+# Calcul des coefficients de corrélation
+pearson_corr, _ = pearsonr(sampled_data['maturity'], sampled_data['volatility'])
+spearman_corr, _ = spearmanr(sampled_data['maturity'], sampled_data['volatility'])
+
+print(f"Coefficient de corrélation de Pearson : {pearson_corr:.2f}")
+print(f"Coefficient de corrélation de Spearman : {spearman_corr:.2f}")
+
+# Analyse des zones de densité élevée
+high_density_zone = sampled_data[(sampled_data['maturity'] <= 100) & (sampled_data['volatility'] <= 2)]
+print(f"Proportion des points dans une zone de Maturity <= 100 jours et Volatility <= 2 : {len(high_density_zone) / len(sampled_data) * 100:.2f}%")
+
+# Détection des outliers potentiels
+outliers = sampled_data[(sampled_data['maturity'] > 300) & (sampled_data['volatility'] > 5)]
+print(f"Nombre d'outliers identifiés : {len(outliers)}")
+
+# Statistiques descriptives pour 'maturity' et 'volatility'
+maturity_stats = sampled_data['maturity'].describe()
+volatility_stats_maturity = sampled_data['volatility'].describe()
+
+# Identifier les zones à forte densité
+maturity_density_zone = sampled_data[(sampled_data['maturity'] < 100) & (sampled_data['volatility'] < 2)]
+maturity_density_proportion = len(maturity_density_zone) / len(sampled_data) * 100
+
+# Statistiques sur la zone de forte densité
+mdz_maturity_stats = maturity_density_zone['maturity'].describe()
+mdz_volatility_stats = maturity_density_zone['volatility'].describe()
+
+print("Statistiques globales de 'maturity' :")
+print(maturity_stats)
+print("\nStatistiques globales de 'volatility' :")
+print(volatility_stats_maturity)
+print(f"\nProportion des points dans la zone de forte densité : {maturity_density_proportion:.2f}%")
+print("Statistiques de 'maturity' dans la zone de forte densité :")
+print(mdz_maturity_stats)
+print("\nStatistiques de 'volatility' dans la zone de forte densité :")
+print(mdz_volatility_stats)
+
+# Préparation des ensembles de données
+X = data[columns_to_normalize]
+y = data['volatility']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Étape 3 : Entraînement et comparaison des modèles
+models = {
+    "RandomForest": RandomForestRegressor(n_estimators=50, max_depth=10, random_state=42),
+    "GradientBoosting": GradientBoostingRegressor(n_estimators=50, max_depth=5, random_state=42),
+    "XGBoost": XGBRegressor(n_estimators=50, max_depth=5, random_state=42)
+}
+
+# Entraînement et comparaison des modèles
+model_results = {}
+for name, model in models.items():
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    r2 = r2_score(y_test, y_pred)
+    model_results[name] = {"RMSE": rmse, "R²": r2}
+    print(f"{name} - RMSE: {rmse}, R²: {r2}")
+
+# Choisir le meilleur modèle
+best_model_name = min(model_results, key=lambda x: model_results[x]["RMSE"])
+best_model = models[best_model_name]
+print(f"\nMeilleur modèle : {best_model_name} avec RMSE={model_results[best_model_name]['RMSE']}")
+
+# Validation croisée pour le meilleur modèle
+scores = cross_val_score(best_model, X, y, cv=3, scoring='neg_mean_squared_error')
+print("\nValidation croisée RMSE :", np.sqrt(-scores.mean()))
+
+
+# Analyse de sensibilité avec SHAP
+explainer = shap.Explainer(best_model, X_test)  # Utiliser uniquement les colonnes de X_test
+shap_values = explainer(X_test)
+shap.summary_plot(shap_values, X_test)
+
+# Comparaison avec Black-Scholes
+X_test_with_predictions = X_test.copy()  # Créer une copie pour ajouter des colonnes sans affecter l'original
+X_test_with_predictions['ml_pred'] = best_model.predict(X_test)
+X_test_with_predictions['bs_call'] = data.loc[X_test.index, 'bs_call']
+comparison_error = np.mean(np.abs(X_test_with_predictions['ml_pred'] - X_test_with_predictions['bs_call']))
+print(f"\nErreur moyenne entre les prédictions ML et Black-Scholes : {comparison_error:.4f}")
+
+# Visualisation des prédictions
+y_pred = best_model.predict(X_test)
+plt.plot(y_test.values, label='True Values', marker='o')
+plt.plot(y_pred, label='Predicted Values', marker='x')
+plt.title('Comparaison entre les valeurs réelles et prédites')
+plt.xlabel('Index')
+plt.ylabel('Volatility')
+plt.legend()
+plt.show()
+
+# Résultats récapitulatifs des modèles
+results_df = pd.DataFrame.from_dict(model_results, orient='index')
+print("\nRésultats des modèles :")
+print(results_df)
